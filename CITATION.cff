@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use misqal or its benchmarks, please cite the paper below."
+title: "misqal: fan-out audit and grain-aware evidence for LLM text-to-SQL"
+type: software
+authors:
+  - family-names: Mahran
+    given-names: Ahmed M.
+    orcid: "https://orcid.org/0009-0007-8309-9331"
+repository-code: "https://github.com/ahmed-mahran/misqal"
+doi: "10.5281/zenodo.24627215"
+license: Apache-2.0
+keywords:
+  - text-to-sql
+  - llm
+  - fan-out
+  - functional-dependencies
+  - benchmark
+preferred-citation:
+  type: article
+  title: "Mind the Trap As LLMs Guess the Data Model: Grain-Aware Guards Against Fan-out in Text-to-SQL and Its Benchmarks"
+  authors:
+    - family-names: Mahran
+      given-names: Ahmed M.
+      orcid: "https://orcid.org/0009-0007-8309-9331"
+  year: 2026
+  journal: "arXiv preprint arXiv:2611.29009"
+  url: "https://arxiv.org/abs/2611.29009"

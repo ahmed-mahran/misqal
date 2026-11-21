@@ -1,0 +1,8 @@
+{
+  "contested": [
+    "520"
+  ],
+  "notes": {
+    "520": "Both judges fix the fan-out, but the question has other flaws: the fewest cards belong to a NULL artist, and the gold returns one arbitrary format where the question asks for all formats of that artist's cards. Corrections disagree (NULL group vs empty result)."
+  }
+}
