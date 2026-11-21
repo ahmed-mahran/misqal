@@ -1,0 +1,20 @@
+{
+  "choose_correction": {
+    "596": "gpt-5.5",
+    "1243": "gpt-5.5",
+    "1279": "gpt-5.5",
+    "1529": "gpt-5.5"
+  },
+  "other_error": ["1243", "1279", "1529"],
+  "notes": {
+    "596": "Gold ranks users by badges x comments and returns one arbitrary badge. Correct: rank users by comment count first, then list all badges of the top user.",
+    "1243": "Hint defines the denominator as patients with PT >= 14; gold divides by all joined rows. Corrected: distinct female patients with PT >= 14 over distinct patients with PT >= 14.",
+    "1279": "Gold's COUNT(CASE ... ELSE 0 END) counts every row (result always 1) besides counting lab rows. Corrected: distinct SLE patients over distinct patients with GOT >= 60.",
+    "1529": "Gold multiplies each transaction by the customer's 20 yearmonth rows (68740.2 vs 3437.01) and filters January on yearmonth instead of transactions; the customer has no January 2012 transactions.",
+    "254": "Both sides of the ratio repeat equally (two connected rows per bond), so the repetition may cancel.",
+    "716": "Question asks for a share of users; the hint prescribes COUNT(UserId) over comments without DISTINCT.",
+    "298": "Question asks for a share of molecules; the hint prescribes an atom-row formula.",
+    "962": "Question asks for a share of drivers; laps > 50 is a per-result condition and the hint counts driverId without DISTINCT.",
+    "1167": "'How many male patients were tested each month' vs hint COUNT(ID)/12 over lab rows."
+  }
+}

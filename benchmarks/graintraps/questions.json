@@ -1,0 +1,622 @@
+[
+  {
+    "id": "bk-rank-then-attach",
+    "db": "bookings",
+    "trap": "rank_then_attach",
+    "question": "Find the top 5 products in each division by total booked amount (amount_usd). For only those division-product pairs, list the division, product, product sub-family, corporate customer ID, and the total booked amount for that division, product, sub-family and customer. Return columns: division, product, product_subfamily, corp_id, total_amount (rounded to 2 decimals).",
+    "gold_sql": "WITH ranked AS (SELECT division, product, RANK() OVER (PARTITION BY division ORDER BY SUM(amount_usd) DESC) AS rk FROM bookings GROUP BY division, product) SELECT b.division, b.product, b.product_subfamily, b.corp_id, ROUND(SUM(b.amount_usd), 2) FROM bookings b JOIN ranked r ON b.division = r.division AND b.product = r.product WHERE r.rk <= 5 GROUP BY b.division, b.product, b.product_subfamily, b.corp_id",
+    "naive_sql": "SELECT division, product, product_subfamily, corp_id, total FROM (SELECT division, product, product_subfamily, corp_id, ROUND(SUM(amount_usd), 2) AS total, RANK() OVER (PARTITION BY division ORDER BY SUM(amount_usd) DESC) AS rk FROM bookings GROUP BY division, product, product_subfamily, corp_id) WHERE rk <= 5",
+    "trap_explanation": "Two steps at two different grains. Products are ranked by their total within a division (grain: division + product). The list then breaks those products down by sub-family and customer. Ranking inside the detailed grouping (division, product, sub-family, customer) ranks customer slices of products, not products: it keeps the 5 biggest product-customer rows per division, so it picks the wrong products and drops most customers of the right ones. Sub-family adds no rows (each product has exactly one sub-family), but corp_id does: every product is booked by several customers.",
+    "solution": "First sum amount_usd per division and product and rank products within each division (ties kept); keep rank 1-5. Then take the bookings of only those division-product pairs and sum amount_usd per division, product, sub-family and customer. One row per division, product and customer; the amount is that customer's bookings of that product in that division. A product booked under two divisions is ranked separately in each."
+  },
+  {
+    "id": "bk-rank-then-count",
+    "db": "bookings",
+    "trap": "rank_then_attach",
+    "question": "For each division, find the top 3 products by total booked amount. Report the division, the product, its total booked amount in that division, and the number of distinct corporate customers that booked that product in that division. Return columns: division, product, total_amount (rounded to 2 decimals), customers.",
+    "gold_sql": "SELECT division, product, total, customers FROM (SELECT division, product, ROUND(SUM(amount_usd), 2) AS total, COUNT(DISTINCT corp_id) AS customers, RANK() OVER (PARTITION BY division ORDER BY SUM(amount_usd) DESC) AS rk FROM bookings GROUP BY division, product) WHERE rk <= 3",
+    "naive_sql": "SELECT division, product, total, customers FROM (SELECT division, product, ROUND(SUM(amount_usd), 2) AS total, COUNT(corp_id) AS customers, RANK() OVER (PARTITION BY division ORDER BY SUM(amount_usd) DESC) AS rk FROM bookings GROUP BY division, product) WHERE rk <= 3",
+    "trap_explanation": "The same customer books the same product many times. Counting corp_id over booking rows counts bookings, not customers.",
+    "solution": "Per division and product: sum amount_usd, count distinct corp_id, and rank products within the division by the sum (ties kept); keep rank 1-3."
+  },
+  {
+    "id": "bk-display-vs-consumption",
+    "db": "bookings",
+    "trap": "rank_then_attach",
+    "question": "Which 5 products have the highest total booked amount across all divisions? For each of them, list every division the product was booked under, together with the product's overall total booked amount (across all divisions, not the division's part). Return columns: product, division, product_total (rounded to 2 decimals).",
+    "gold_sql": "WITH top AS (SELECT product, SUM(amount_usd) AS t FROM bookings GROUP BY product ORDER BY t DESC LIMIT 5) SELECT DISTINCT b.product, b.division, ROUND(top.t, 2) FROM top JOIN bookings b ON b.product = top.product",
+    "naive_sql": "SELECT product, division, ROUND(SUM(amount_usd), 2) FROM bookings GROUP BY product, division ORDER BY SUM(amount_usd) DESC LIMIT 5",
+    "trap_explanation": "21 of the 90 products are booked under two divisions. Ranking by product and division ranks product-division slices: a big product split across two divisions can drop out of the top 5, and the total shown is one division's part only. Ranking and total belong to the product; division is only listed.",
+    "solution": "Sum amount_usd per product over all divisions and take the 5 largest. Then list each distinct division the product was booked under, repeating the product's overall total on each row. A product booked under two divisions gives two rows with the same total."
+  },
+  {
+    "id": "bk-share-mn-mapping",
+    "db": "bookings",
+    "trap": "mn_mapping",
+    "question": "For each division, what percentage of the division's total booked amount comes from each product sub-family booked in that division? Return columns: division, product_subfamily, pct (percentage rounded to 2 decimals).",
+    "gold_sql": "WITH ds AS (SELECT division, product_subfamily, SUM(amount_usd) AS s FROM bookings GROUP BY division, product_subfamily), d AS (SELECT division, SUM(amount_usd) AS t FROM bookings GROUP BY division) SELECT ds.division, ds.product_subfamily, ROUND(100.0 * ds.s / d.t, 2) FROM ds JOIN d ON ds.division = d.division",
+    "naive_sql": "WITH sf AS (SELECT product_subfamily, SUM(amount_usd) AS s FROM bookings GROUP BY product_subfamily), m AS (SELECT DISTINCT division, product_subfamily FROM bookings), d AS (SELECT division, SUM(amount_usd) AS t FROM bookings GROUP BY division) SELECT m.division, m.product_subfamily, ROUND(100.0 * sf.s / d.t, 2) FROM m JOIN sf ON m.product_subfamily = sf.product_subfamily JOIN d ON m.division = d.division",
+    "trap_explanation": "A sub-family does not sit inside one division: 15 sub-families have bookings under more than one division, because some of their products are booked under two divisions. Taking a sub-family's total over all divisions and dividing by one division's total overstates the share; a division's shares can then add up to more than 100%.",
+    "solution": "Numerator: amount_usd per division and sub-family, counting only bookings under that division. Denominator: the division's total. pct = 100 x numerator / denominator. Each division's shares add up to 100."
+  },
+  {
+    "id": "sp-chasm-category",
+    "db": "supply",
+    "trap": "chasm",
+    "question": "For each product category, report the total quantity ordered (over all order lines) and the total units on hand in inventory (over all warehouses and lots). Return columns: category, total_ordered, total_on_hand.",
+    "gold_sql": "WITH o AS (SELECT p.category, SUM(l.quantity) AS q FROM order_lines l JOIN products p ON p.product_id = l.product_id GROUP BY p.category), i AS (SELECT p.category, SUM(v.on_hand) AS h FROM inventory v JOIN products p ON p.product_id = v.product_id GROUP BY p.category) SELECT p.category, COALESCE(o.q, 0), COALESCE(i.h, 0) FROM (SELECT DISTINCT category FROM products) p LEFT JOIN o ON o.category = p.category LEFT JOIN i ON i.category = p.category",
+    "naive_sql": "SELECT p.category, SUM(l.quantity), SUM(v.on_hand) FROM products p JOIN order_lines l ON l.product_id = p.product_id JOIN inventory v ON v.product_id = p.product_id GROUP BY p.category",
+    "trap_explanation": "Chasm trap. A product has many order lines and, separately, many inventory lots (often several per warehouse). Joining both to products in one query pairs every order line of a product with every lot of that product, so ordered quantity is repeated once per lot and on-hand units once per order line. Both totals come out too large.",
+    "solution": "Compute the two totals separately: ordered quantity per category (order_lines joined to products) and on-hand units per category (inventory joined to products). Then put them side by side per category, with 0 where one side has nothing."
+  },
+  {
+    "id": "sp-what-if-double",
+    "db": "supply",
+    "trap": "chasm",
+    "question": "If the customer Northwind Motors doubled the quantity of every order line it has placed, how many units would remain on hand for each product it ordered? Use the product's total units on hand over all warehouses and lots, minus twice the total quantity Northwind Motors ordered of it. Return columns: product_name, total_on_hand, doubled_ordered, remaining.",
+    "gold_sql": "WITH q AS (SELECT l.product_id, 2 * SUM(l.quantity) AS dq FROM order_lines l JOIN orders o ON o.order_id = l.order_id JOIN customers c ON c.customer_id = o.customer_id WHERE c.customer_name = 'Northwind Motors' GROUP BY l.product_id), h AS (SELECT product_id, SUM(on_hand) AS oh FROM inventory GROUP BY product_id) SELECT p.product_name, COALESCE(h.oh, 0), q.dq, COALESCE(h.oh, 0) - q.dq FROM q JOIN products p ON p.product_id = q.product_id LEFT JOIN h ON h.product_id = q.product_id",
+    "naive_sql": "SELECT p.product_name, SUM(v.on_hand), 2 * SUM(l.quantity), SUM(v.on_hand) - 2 * SUM(l.quantity) FROM order_lines l JOIN orders o ON o.order_id = l.order_id JOIN customers c ON c.customer_id = o.customer_id JOIN products p ON p.product_id = l.product_id JOIN inventory v ON v.product_id = l.product_id WHERE c.customer_name = 'Northwind Motors' GROUP BY p.product_name",
+    "trap_explanation": "Chasm trap. Joining Northwind Motors' order lines and the products' inventory lots in one query pairs every line with every lot of the same product, so both on-hand and ordered totals are inflated, and so is 'remaining'.",
+    "solution": "Separately compute (a) Northwind Motors' ordered quantity per product, doubled, and (b) each product's on-hand units over all warehouses and lots. Join them per product for the products Northwind ordered; remaining = on hand - doubled ordered. A product with no stock has 0 on hand."
+  },
+  {
+    "id": "sp-projection-join",
+    "db": "supply",
+    "trap": "projection_join",
+    "question": "For each product and warehouse where the product is stocked, report the units on hand there and the total quantity shipped from that warehouse for that product (0 if none). Return columns: product_id, warehouse_id, on_hand, shipped.",
+    "gold_sql": "WITH i AS (SELECT product_id, warehouse_id, SUM(on_hand) AS oh FROM inventory GROUP BY product_id, warehouse_id), s AS (SELECT product_id, warehouse_id, SUM(quantity) AS q FROM order_lines GROUP BY product_id, warehouse_id) SELECT i.product_id, i.warehouse_id, i.oh, COALESCE(s.q, 0) FROM i LEFT JOIN s ON s.product_id = i.product_id AND s.warehouse_id = i.warehouse_id",
+    "naive_sql": "SELECT v.product_id, v.warehouse_id, SUM(v.on_hand), COALESCE(SUM(l.quantity), 0) FROM inventory v LEFT JOIN order_lines l ON l.product_id = v.product_id AND l.warehouse_id = v.warehouse_id GROUP BY v.product_id, v.warehouse_id",
+    "trap_explanation": "Inventory has several lots for the same product and warehouse (52 such pairs), and several order lines ship the same product from the same warehouse. Joining lots to order lines on product and warehouse pairs every lot with every line, so on-hand is repeated once per shipped line and shipped quantity once per lot.",
+    "solution": "Sum on_hand per product and warehouse from inventory; separately sum shipped quantity per product and warehouse from order_lines. Join the two on product and warehouse, keeping every stocked pair, with shipped = 0 where nothing was shipped."
+  },
+  {
+    "id": "sp-fan-orders",
+    "db": "supply",
+    "trap": "fan",
+    "question": "For each customer, report the number of orders they placed and their total ordered revenue (quantity times the product's unit price, rounded to 2 decimals). Return columns: customer_name, orders, revenue.",
+    "gold_sql": "SELECT c.customer_name, COUNT(DISTINCT o.order_id), ROUND(SUM(l.quantity * p.unit_price), 2) FROM customers c JOIN orders o ON o.customer_id = c.customer_id JOIN order_lines l ON l.order_id = o.order_id JOIN products p ON p.product_id = l.product_id GROUP BY c.customer_name",
+    "naive_sql": "SELECT c.customer_name, COUNT(o.order_id), ROUND(SUM(l.quantity * p.unit_price), 2) FROM customers c JOIN orders o ON o.customer_id = c.customer_id JOIN order_lines l ON l.order_id = o.order_id JOIN products p ON p.product_id = l.product_id GROUP BY c.customer_name",
+    "trap_explanation": "Fan trap. An order has several lines. Once orders are joined to order lines (needed for revenue), each order appears once per line, so COUNT(order_id) counts lines, not orders.",
+    "solution": "Join customers, orders, order lines and products. Revenue = sum of quantity x unit price over the lines. Orders = number of distinct order IDs."
+  },
+  {
+    "id": "sp-top-n-attach",
+    "db": "supply",
+    "trap": "rank_then_attach",
+    "question": "Find the 3 products with the highest total quantity ordered. For each of them, list each warehouse holding the product, with the units on hand at that warehouse and the product's total quantity ordered (over all warehouses). Return columns: product_name, warehouse_name, on_hand, total_ordered.",
+    "gold_sql": "WITH t AS (SELECT product_id, SUM(quantity) AS q FROM order_lines GROUP BY product_id ORDER BY q DESC LIMIT 3), i AS (SELECT product_id, warehouse_id, SUM(on_hand) AS oh FROM inventory GROUP BY product_id, warehouse_id) SELECT p.product_name, w.warehouse_name, i.oh, t.q FROM t JOIN i ON i.product_id = t.product_id JOIN products p ON p.product_id = t.product_id JOIN warehouses w ON w.warehouse_id = i.warehouse_id",
+    "naive_sql": "SELECT p.product_name, w.warehouse_name, SUM(v.on_hand), SUM(l.quantity) FROM order_lines l JOIN inventory v ON v.product_id = l.product_id JOIN products p ON p.product_id = l.product_id JOIN warehouses w ON w.warehouse_id = v.warehouse_id WHERE l.product_id IN (SELECT product_id FROM order_lines GROUP BY product_id ORDER BY SUM(quantity) DESC LIMIT 3) GROUP BY p.product_name, w.warehouse_name",
+    "trap_explanation": "Chasm trap. Ordered quantity comes from order lines and stock from inventory lots, both many per product. Joining them per product repeats each line once per lot and each lot once per line, inflating both on-hand per warehouse and total ordered.",
+    "solution": "Find the 3 products with the largest total ordered quantity, from order_lines alone. Sum on_hand per product and warehouse from inventory. One row per top product and warehouse holding it: that warehouse's on-hand and the product's total ordered (the same on each of its rows)."
+  },
+  {
+    "id": "bk-top-corps-divisions",
+    "db": "bookings",
+    "trap": "rank_then_attach",
+    "question": "Find the top 3 corporate customers in each sales org by total booked amount. For each of them, list every division they booked under. Return columns: sales_org, corp_id, division, total_amount (the customer's total booked amount in that sales org, rounded to 2 decimals).",
+    "gold_sql": "WITH t AS (SELECT sales_org, corp_id, SUM(amount_usd) AS s, RANK() OVER (PARTITION BY sales_org ORDER BY SUM(amount_usd) DESC) AS rk FROM bookings GROUP BY sales_org, corp_id) SELECT DISTINCT t.sales_org, t.corp_id, b.division, ROUND(t.s, 2) FROM t JOIN bookings b ON b.sales_org = t.sales_org AND b.corp_id = t.corp_id WHERE t.rk <= 3",
+    "naive_sql": "SELECT sales_org, corp_id, division, total FROM (SELECT sales_org, corp_id, division, ROUND(SUM(amount_usd), 2) AS total, RANK() OVER (PARTITION BY sales_org ORDER BY SUM(amount_usd) DESC) AS rk FROM bookings GROUP BY sales_org, corp_id, division) WHERE rk <= 3",
+    "trap_explanation": "Customers book under several divisions. Ranking inside (sales org, customer, division) ranks a customer's division slices: it can pick the wrong customers, and it shows a division's part instead of the customer's total in the org.",
+    "solution": "Sum amount_usd per sales org and customer and rank customers within each org (ties kept); keep rank 1-3. Then list each distinct division that customer booked under in that org, repeating the customer's org total on each row."
+  },
+  {
+    "id": "bk-weekly-top-orgs",
+    "db": "bookings",
+    "trap": "rank_then_attach",
+    "question": "For each booking week, find the single product with the highest total booked amount that week, and list the sales orgs that booked it that week. Return columns: booking_week, product, sales_org, week_total (the product's total for the week, rounded to 2 decimals).",
+    "gold_sql": "WITH t AS (SELECT booking_week, product, SUM(amount_usd) AS s, RANK() OVER (PARTITION BY booking_week ORDER BY SUM(amount_usd) DESC) AS rk FROM bookings GROUP BY booking_week, product) SELECT DISTINCT t.booking_week, t.product, b.sales_org, ROUND(t.s, 2) FROM t JOIN bookings b ON b.booking_week = t.booking_week AND b.product = t.product WHERE t.rk = 1",
+    "naive_sql": "SELECT booking_week, product, sales_org, total FROM (SELECT booking_week, product, sales_org, ROUND(SUM(amount_usd), 2) AS total, RANK() OVER (PARTITION BY booking_week ORDER BY SUM(amount_usd) DESC) AS rk FROM bookings GROUP BY booking_week, product, sales_org) WHERE rk = 1",
+    "trap_explanation": "A product is booked by several sales orgs in the same week. Ranking inside (week, product, org) finds the biggest org slice, not the biggest product, and reports that slice instead of the product's total for the week.",
+    "solution": "Sum amount_usd per week and product and rank products within each week; keep rank 1 (ties kept). Then list each distinct sales org that booked that product that week, repeating the product's week total on each row."
+  },
+  {
+    "id": "bk-family-division-share",
+    "db": "bookings",
+    "trap": "mn_mapping",
+    "question": "For each product family, what share (%) of the family's total booked amount was booked under each division? Return columns: product_family, division, pct (rounded to 2 decimals).",
+    "gold_sql": "WITH fd AS (SELECT product_family, division, SUM(amount_usd) AS s FROM bookings GROUP BY product_family, division), f AS (SELECT product_family, SUM(amount_usd) AS t FROM bookings GROUP BY product_family) SELECT fd.product_family, fd.division, ROUND(100.0 * fd.s / f.t, 2) FROM fd JOIN f ON f.product_family = fd.product_family",
+    "naive_sql": "WITH f AS (SELECT product_family, SUM(amount_usd) AS t FROM bookings GROUP BY product_family), m AS (SELECT DISTINCT product_family, division FROM bookings) SELECT m.product_family, m.division, ROUND(100.0 * SUM(b.amount_usd) / f.t, 2) FROM m JOIN f ON f.product_family = m.product_family JOIN bookings b ON b.product_family = m.product_family GROUP BY m.product_family, m.division",
+    "trap_explanation": "Family and division are many-to-many: a family's products are booked under several divisions. Joining a family's bookings to each (family, division) pair on family alone pulls in all of the family's bookings for every division, so every share comes out as 100%.",
+    "solution": "Sum amount_usd per family and division, divide by the family's total, and multiply by 100. Each family's shares add up to 100."
+  },
+  {
+    "id": "bk-control-top-products-subfamily",
+    "db": "bookings",
+    "trap": "control",
+    "question": "Which 5 products have the highest total booked amount? Show each product's sub-family and total. Return columns: product, product_subfamily, total_amount (rounded to 2 decimals).",
+    "gold_sql": "SELECT product, product_subfamily, ROUND(SUM(amount_usd), 2) FROM bookings GROUP BY product, product_subfamily ORDER BY SUM(amount_usd) DESC LIMIT 5",
+    "naive_sql": null,
+    "trap_explanation": "Control question, no trap. Each product has exactly one sub-family, so grouping by product and sub-family gives the same groups as grouping by product alone.",
+    "solution": "Sum amount_usd per product, show its sub-family, and take the 5 largest."
+  },
+  {
+    "id": "sp-over-ordered",
+    "db": "supply",
+    "trap": "chasm",
+    "question": "Which products have been ordered in a larger total quantity than the stock we hold of them? Return columns: product_name, total_ordered, in_stock.",
+    "gold_sql": "WITH o AS (SELECT product_id, SUM(quantity) AS q FROM order_lines GROUP BY product_id), i AS (SELECT product_id, SUM(on_hand) AS h FROM inventory GROUP BY product_id) SELECT p.product_name, o.q, COALESCE(i.h, 0) FROM products p JOIN o ON o.product_id = p.product_id LEFT JOIN i ON i.product_id = p.product_id WHERE o.q > COALESCE(i.h, 0)",
+    "naive_sql": "SELECT p.product_name, SUM(l.quantity), SUM(v.on_hand) FROM products p JOIN order_lines l ON l.product_id = p.product_id JOIN inventory v ON v.product_id = p.product_id GROUP BY p.product_name HAVING SUM(l.quantity) > SUM(v.on_hand)",
+    "trap_explanation": "Chasm trap. The two totals being compared come from two different 'many' tables (order lines and inventory lots). Joined in one query, both are multiplied, so the reported totals and the comparison are wrong.",
+    "solution": "Total ordered per product from order_lines; total on hand per product from inventory over all warehouses and lots (0 if none). Keep the products where ordered > on hand."
+  },
+  {
+    "id": "sp-warehouse-stock-shipped",
+    "db": "supply",
+    "trap": "chasm",
+    "question": "For each warehouse, how many units does it hold in stock and how many units has it shipped? Return columns: warehouse_name, in_stock, shipped.",
+    "gold_sql": "WITH i AS (SELECT warehouse_id, SUM(on_hand) AS h FROM inventory GROUP BY warehouse_id), s AS (SELECT warehouse_id, SUM(quantity) AS q FROM order_lines GROUP BY warehouse_id) SELECT w.warehouse_name, COALESCE(i.h, 0), COALESCE(s.q, 0) FROM warehouses w LEFT JOIN i ON i.warehouse_id = w.warehouse_id LEFT JOIN s ON s.warehouse_id = w.warehouse_id",
+    "naive_sql": "SELECT w.warehouse_name, SUM(v.on_hand), SUM(l.quantity) FROM warehouses w JOIN inventory v ON v.warehouse_id = w.warehouse_id JOIN order_lines l ON l.warehouse_id = w.warehouse_id AND l.product_id = v.product_id GROUP BY w.warehouse_name",
+    "trap_explanation": "Chasm trap. A warehouse has many inventory lots and many shipped order lines. Joining them pairs lots with lines, so stock is repeated once per shipped line and shipments once per lot.",
+    "solution": "Stock: sum on_hand per warehouse from inventory. Shipped: sum quantity per warehouse from order_lines. Put them side by side per warehouse, with 0 where one side has nothing."
+  },
+  {
+    "id": "sp-avg-units-per-order",
+    "db": "supply",
+    "trap": "fan",
+    "question": "For each customer, what is the average number of units per order? Return columns: customer_name, avg_units (rounded to 2 decimals).",
+    "gold_sql": "SELECT c.customer_name, ROUND(1.0 * SUM(l.quantity) / COUNT(DISTINCT o.order_id), 2) FROM customers c JOIN orders o ON o.customer_id = c.customer_id JOIN order_lines l ON l.order_id = o.order_id GROUP BY c.customer_name",
+    "naive_sql": "SELECT c.customer_name, ROUND(AVG(l.quantity), 2) FROM customers c JOIN orders o ON o.customer_id = c.customer_id JOIN order_lines l ON l.order_id = o.order_id GROUP BY c.customer_name",
+    "trap_explanation": "Wrong grain caused by the order-to-lines fan-out. AVG(quantity) over order lines is the average units per line. An order has 1-5 lines, so the average per order is larger.",
+    "solution": "Per customer: total units over all their order lines divided by their number of distinct orders (the same as summing units per order and then averaging those orders)."
+  },
+  {
+    "id": "sp-category-suppliers",
+    "db": "supply",
+    "trap": "mn_mapping",
+    "question": "For each product category, report the total quantity ordered and the number of distinct suppliers that supply products in that category. Return columns: category, total_ordered, suppliers.",
+    "gold_sql": "WITH o AS (SELECT p.category, SUM(l.quantity) AS q FROM order_lines l JOIN products p ON p.product_id = l.product_id GROUP BY p.category), s AS (SELECT p.category, COUNT(DISTINCT ps.supplier_id) AS n FROM product_suppliers ps JOIN products p ON p.product_id = ps.product_id GROUP BY p.category) SELECT s.category, COALESCE(o.q, 0), s.n FROM s LEFT JOIN o ON o.category = s.category",
+    "naive_sql": "SELECT p.category, SUM(l.quantity), COUNT(DISTINCT ps.supplier_id) FROM products p JOIN order_lines l ON l.product_id = p.product_id JOIN product_suppliers ps ON ps.product_id = p.product_id GROUP BY p.category",
+    "trap_explanation": "Products and suppliers are many-to-many: a product has 1-3 suppliers. Joining order lines and product suppliers to products in one query repeats each order line once per supplier of its product, inflating total ordered. The distinct supplier count is not affected.",
+    "solution": "Separately compute total ordered per category (order_lines with products) and the number of distinct suppliers per category (product_suppliers with products), then join by category."
+  },
+  {
+    "id": "sp-supplier-exposure",
+    "db": "supply",
+    "trap": "mn_mapping",
+    "question": "What is the total quantity ordered of products that are supplied by Supplier E or Supplier G? Return one column: total_ordered.",
+    "gold_sql": "SELECT SUM(l.quantity) FROM order_lines l WHERE l.product_id IN (SELECT ps.product_id FROM product_suppliers ps JOIN suppliers s ON s.supplier_id = ps.supplier_id WHERE s.supplier_name IN ('Supplier E', 'Supplier G'))",
+    "naive_sql": "SELECT SUM(l.quantity) FROM order_lines l JOIN product_suppliers ps ON ps.product_id = l.product_id JOIN suppliers s ON s.supplier_id = ps.supplier_id WHERE s.supplier_name IN ('Supplier E', 'Supplier G')",
+    "trap_explanation": "5 products are supplied by both Supplier E and Supplier G. Joining order lines to the product-supplier list and filtering to E or G keeps such a line twice, once per matching supplier, so its quantity is counted twice.",
+    "solution": "First find the set of products supplied by E or G; then sum the quantity of order lines whose product is in that set, so each line counts once."
+  },
+  {
+    "id": "sp-top-customers-products",
+    "db": "supply",
+    "trap": "rank_then_attach",
+    "question": "Find the 2 customers who placed the most orders. For each of them, list every product they have ordered, along with the customer's total number of orders. Return columns: customer_name, product_name, orders.",
+    "gold_sql": "WITH t AS (SELECT customer_id, COUNT(*) AS n FROM orders GROUP BY customer_id ORDER BY n DESC LIMIT 2) SELECT DISTINCT c.customer_name, p.product_name, t.n FROM t JOIN customers c ON c.customer_id = t.customer_id JOIN orders o ON o.customer_id = t.customer_id JOIN order_lines l ON l.order_id = o.order_id JOIN products p ON p.product_id = l.product_id",
+    "naive_sql": "SELECT c.customer_name, p.product_name, COUNT(o.order_id) FROM customers c JOIN orders o ON o.customer_id = c.customer_id JOIN order_lines l ON l.order_id = o.order_id JOIN products p ON p.product_id = l.product_id WHERE c.customer_id IN (SELECT customer_id FROM orders GROUP BY customer_id ORDER BY COUNT(*) DESC LIMIT 2) GROUP BY c.customer_name, p.product_name",
+    "trap_explanation": "The order count belongs to the customer, but the list is per customer and product. Grouping by customer and product and counting orders gives, per product, the number of lines for that product, not the customer's total number of orders.",
+    "solution": "Count orders per customer from orders and take the 2 largest. Then list each distinct product those customers ordered, repeating the customer's total order count on every row."
+  },
+  {
+    "id": "sp-stock-value-orders",
+    "db": "supply",
+    "trap": "chasm",
+    "question": "For each product category, what is the value of the stock we hold (units on hand times unit price) and how many distinct orders include products of that category? Return columns: category, stock_value (rounded to 2 decimals), orders.",
+    "gold_sql": "WITH v AS (SELECT p.category, SUM(i.on_hand * p.unit_price) AS sv FROM inventory i JOIN products p ON p.product_id = i.product_id GROUP BY p.category), o AS (SELECT p.category, COUNT(DISTINCT l.order_id) AS n FROM order_lines l JOIN products p ON p.product_id = l.product_id GROUP BY p.category) SELECT c.category, ROUND(COALESCE(v.sv, 0), 2), COALESCE(o.n, 0) FROM (SELECT DISTINCT category FROM products) c LEFT JOIN v ON v.category = c.category LEFT JOIN o ON o.category = c.category",
+    "naive_sql": "SELECT p.category, ROUND(SUM(i.on_hand * p.unit_price), 2), COUNT(DISTINCT l.order_id) FROM products p JOIN inventory i ON i.product_id = p.product_id JOIN order_lines l ON l.product_id = p.product_id GROUP BY p.category",
+    "trap_explanation": "Chasm trap. Stock value comes from inventory lots and the order count from order lines, both many per product. In one join each lot repeats once per order line, inflating stock value. The distinct order count is not affected.",
+    "solution": "Separately compute stock value per category (sum of on_hand x unit_price over inventory) and orders per category (distinct order IDs among lines for that category's products), then join by category."
+  },
+  {
+    "id": "sp-control-category-ordered",
+    "db": "supply",
+    "trap": "control",
+    "question": "For each product category, what is the total quantity ordered? Return columns: category, total_ordered.",
+    "gold_sql": "SELECT p.category, SUM(l.quantity) FROM order_lines l JOIN products p ON p.product_id = l.product_id GROUP BY p.category",
+    "naive_sql": null,
+    "trap_explanation": "Control question, no trap. Each order line has one product and each product one category, so joining lines to products adds no rows.",
+    "solution": "Join order_lines to products and sum quantity per category."
+  },
+  {
+    "id": "sh-shipping-by-segment",
+    "db": "shop",
+    "trap": "fan",
+    "question": "How much was charged in shipping fees in total for each customer segment? Return columns: customer_segment, shipping_total (rounded to 2 decimals).",
+    "gold_sql": "SELECT customer_segment, ROUND(SUM(fee), 2) FROM (SELECT DISTINCT order_id, customer_segment, shipping_fee AS fee FROM sales_lines) GROUP BY customer_segment",
+    "naive_sql": "SELECT customer_segment, ROUND(SUM(shipping_fee), 2) FROM sales_lines GROUP BY customer_segment",
+    "trap_explanation": "Fan trap inside one wide table. sales_lines has one row per order line, but the shipping fee belongs to the order and is repeated on every line of it. Summing the fee over lines charges each order's fee once per line.",
+    "solution": "Reduce to one row per order first (each order has exactly one segment and one fee), then sum the fees per segment."
+  },
+  {
+    "id": "sh-avg-shipping-region",
+    "db": "shop",
+    "trap": "fan",
+    "question": "What is the average shipping fee per order in each region? Return columns: ship_region, avg_fee (rounded to 2 decimals).",
+    "gold_sql": "SELECT ship_region, ROUND(AVG(fee), 2) FROM (SELECT DISTINCT order_id, ship_region, shipping_fee AS fee FROM sales_lines) GROUP BY ship_region",
+    "naive_sql": "SELECT ship_region, ROUND(AVG(shipping_fee), 2) FROM sales_lines GROUP BY ship_region",
+    "trap_explanation": "The shipping fee belongs to the order and is repeated on every line. Averaging it over lines weights each order by its number of lines, so orders with many lines count more.",
+    "solution": "Reduce to one row per order (each order has exactly one region and one fee), then average the fees per region."
+  },
+  {
+    "id": "sh-order-value-top",
+    "db": "shop",
+    "trap": "fan",
+    "question": "Which 5 orders have the highest total value, where an order's value is the sum of quantity times unit price over its lines plus its shipping fee? Return columns: order_id, order_value (rounded to 2 decimals).",
+    "gold_sql": "SELECT order_id, ROUND(SUM(quantity * unit_price) + MAX(shipping_fee), 2) AS v FROM sales_lines GROUP BY order_id ORDER BY v DESC LIMIT 5",
+    "naive_sql": "SELECT order_id, ROUND(SUM(quantity * unit_price + shipping_fee), 2) AS v FROM sales_lines GROUP BY order_id ORDER BY v DESC LIMIT 5",
+    "trap_explanation": "The shipping fee is repeated on every line of an order. Adding it inside the per-line sum counts it once per line.",
+    "solution": "Per order: sum quantity x unit price over its lines, then add the order's fee once (it is the same on every line, so MAX or any single value works). Take the 5 largest."
+  },
+  {
+    "id": "sh-top-products-category",
+    "db": "shop",
+    "trap": "null_split",
+    "question": "Which 5 products have the highest total revenue (quantity times unit price)? Show each product's category. Return columns: product_name, category, revenue (rounded to 2 decimals).",
+    "gold_sql": "SELECT product_name, MAX(category), ROUND(SUM(quantity * unit_price), 2) AS r FROM sales_lines GROUP BY product_name ORDER BY SUM(quantity * unit_price) DESC LIMIT 5",
+    "naive_sql": "SELECT product_name, category, ROUND(SUM(quantity * unit_price), 2) AS r FROM sales_lines GROUP BY product_name, category ORDER BY SUM(quantity * unit_price) DESC LIMIT 5",
+    "trap_explanation": "NULL split. 10 products have their category missing on part of their rows; apart from that, each product has only one category. Grouping by product and category splits such a product into two groups (its category and NULL), so its revenue is split, the ranking is wrong, and it can appear twice. These products also sell more than average, so the split changes the top 5.",
+    "solution": "Group by product only and sum revenue. Show the product's one non-missing category (e.g. MAX(category), which ignores NULL). Take the 5 largest."
+  },
+  {
+    "id": "sh-product-revenue-list",
+    "db": "shop",
+    "trap": "null_split",
+    "question": "List every product with its category and its total units sold. Return columns: product_name, category, units.",
+    "gold_sql": "SELECT product_name, MAX(category), SUM(quantity) FROM sales_lines GROUP BY product_name",
+    "naive_sql": "SELECT product_name, category, SUM(quantity) FROM sales_lines GROUP BY product_name, category",
+    "trap_explanation": "NULL split. 10 products have their category missing on part of their rows. Grouping by product and category gives two rows for each of them (category and NULL) and splits their units between the two.",
+    "solution": "One row per product: its one non-missing category and its total units over all its rows."
+  },
+  {
+    "id": "sh-tagged-revenue",
+    "db": "shop",
+    "trap": "mn_mapping",
+    "question": "What is the total revenue (quantity times unit price) from products tagged 'eco' or 'premium'? Return one column: revenue (rounded to 2 decimals).",
+    "gold_sql": "SELECT ROUND(SUM(quantity * unit_price), 2) FROM sales_lines WHERE product_name IN (SELECT product_name FROM product_tags WHERE tag IN ('eco', 'premium'))",
+    "naive_sql": "SELECT ROUND(SUM(s.quantity * s.unit_price), 2) FROM sales_lines s JOIN product_tags t ON t.product_name = s.product_name WHERE t.tag IN ('eco', 'premium')",
+    "trap_explanation": "Products and tags are many-to-many. 2 products carry both 'eco' and 'premium'; joining sales to tags and filtering to those tags keeps their sales twice.",
+    "solution": "Find the products tagged eco or premium, then sum the revenue of sales lines whose product is in that set, so each line counts once."
+  },
+  {
+    "id": "sh-region-target",
+    "db": "shop",
+    "trap": "projection_join",
+    "question": "For each region, compare actual revenue (quantity times unit price) in the first quarter of 2026 with the region's target for that quarter. Return columns: region, revenue, target (both rounded to 2 decimals).",
+    "gold_sql": "WITH a AS (SELECT ship_region AS region, SUM(quantity * unit_price) AS r FROM sales_lines WHERE order_date BETWEEN '2026-01-01' AND '2026-03-31' GROUP BY ship_region), t AS (SELECT region, SUM(target_revenue) AS t FROM sales_targets WHERE quarter = '2026-Q1' GROUP BY region) SELECT t.region, ROUND(COALESCE(a.r, 0), 2), ROUND(t.t, 2) FROM t LEFT JOIN a ON a.region = t.region",
+    "naive_sql": "SELECT s.ship_region, ROUND(SUM(s.quantity * s.unit_price), 2), ROUND(SUM(t.target_revenue), 2) FROM sales_lines s JOIN sales_targets t ON t.region = s.ship_region AND t.quarter = '2026-Q1' WHERE s.order_date BETWEEN '2026-01-01' AND '2026-03-31' GROUP BY s.ship_region",
+    "trap_explanation": "Targets are set per region, segment and quarter, so a region has 3 target rows per quarter (one per segment). Joining sales lines to targets on region and quarter matches each line to 3 target rows: revenue is tripled and the target is summed once per sales line.",
+    "solution": "Separately compute Q1 2026 revenue per region from sales_lines (by order_date) and the Q1 target per region as the sum of its three segment targets; join by region."
+  },
+  {
+    "id": "sh-segment-attainment",
+    "db": "shop",
+    "trap": "projection_join",
+    "question": "For each customer segment, what percentage of its 2026 second-quarter target did it reach? Revenue is quantity times unit price. Return columns: customer_segment, pct (rounded to 2 decimals).",
+    "gold_sql": "WITH a AS (SELECT customer_segment, SUM(quantity * unit_price) AS r FROM sales_lines WHERE order_date BETWEEN '2026-04-01' AND '2026-06-30' GROUP BY customer_segment), t AS (SELECT customer_segment, SUM(target_revenue) AS t FROM sales_targets WHERE quarter = '2026-Q2' GROUP BY customer_segment) SELECT t.customer_segment, ROUND(100.0 * COALESCE(a.r, 0) / t.t, 2) FROM t LEFT JOIN a ON a.customer_segment = t.customer_segment",
+    "naive_sql": "WITH a AS (SELECT customer_segment, SUM(quantity * unit_price) AS r FROM sales_lines WHERE order_date BETWEEN '2026-04-01' AND '2026-06-30' GROUP BY customer_segment) SELECT a.customer_segment, ROUND(100.0 * SUM(a.r) / SUM(t.target_revenue), 2) FROM a JOIN sales_targets t ON t.customer_segment = a.customer_segment AND t.quarter = '2026-Q2' GROUP BY a.customer_segment",
+    "trap_explanation": "Targets are set per region, segment and quarter, so a segment has 4 target rows per quarter (one per region). Joining the segment's revenue to its target rows on segment and quarter repeats the revenue 4 times, so attainment comes out 4 times too high.",
+    "solution": "Q2 2026 revenue per segment from sales_lines; Q2 target per segment = sum over its 4 regions; pct = 100 x revenue / target."
+  },
+  {
+    "id": "sh-top-customers-regions",
+    "db": "shop",
+    "trap": "rank_then_attach",
+    "question": "Find the 5 customers with the highest total revenue (quantity times unit price), and list every region they ship to. Return columns: customer_name, ship_region, revenue (the customer's total revenue, rounded to 2 decimals).",
+    "gold_sql": "WITH t AS (SELECT customer_name, SUM(quantity * unit_price) AS r FROM sales_lines GROUP BY customer_name ORDER BY r DESC LIMIT 5) SELECT DISTINCT t.customer_name, s.ship_region, ROUND(t.r, 2) FROM t JOIN sales_lines s ON s.customer_name = t.customer_name",
+    "naive_sql": "SELECT customer_name, ship_region, ROUND(SUM(quantity * unit_price), 2) AS r FROM sales_lines GROUP BY customer_name, ship_region ORDER BY SUM(quantity * unit_price) DESC LIMIT 5",
+    "trap_explanation": "8 customers ship to two regions. Ranking (customer, region) groups ranks regional slices: it can miss customers, and it shows one region's part instead of the customer's total.",
+    "solution": "Sum revenue per customer and take the 5 largest. Then list each distinct region they ship to, repeating the customer's total on each row."
+  },
+  {
+    "id": "sh-tag-category-revenue",
+    "db": "shop",
+    "trap": "mn_mapping",
+    "question": "For each customer segment, report total revenue (quantity times unit price) and the number of distinct product tags among the products it bought. Return columns: customer_segment, revenue (rounded to 2 decimals), tags.",
+    "gold_sql": "WITH r AS (SELECT customer_segment, SUM(quantity * unit_price) AS r FROM sales_lines GROUP BY customer_segment), t AS (SELECT s.customer_segment, COUNT(DISTINCT pt.tag) AS n FROM (SELECT DISTINCT customer_segment, product_name FROM sales_lines) s JOIN product_tags pt ON pt.product_name = s.product_name GROUP BY s.customer_segment) SELECT r.customer_segment, ROUND(r.r, 2), COALESCE(t.n, 0) FROM r LEFT JOIN t ON t.customer_segment = r.customer_segment",
+    "naive_sql": "SELECT s.customer_segment, ROUND(SUM(s.quantity * s.unit_price), 2), COUNT(DISTINCT t.tag) FROM sales_lines s JOIN product_tags t ON t.product_name = s.product_name GROUP BY s.customer_segment",
+    "trap_explanation": "Products have 1-3 tags. Joining sales lines to tags repeats each line once per tag of its product, inflating revenue. The distinct tag count is not affected.",
+    "solution": "Revenue per segment from sales_lines alone; separately, the number of distinct tags among the products each segment bought; join by segment."
+  },
+  {
+    "id": "sh-control-region-revenue",
+    "db": "shop",
+    "trap": "control",
+    "question": "What is the total revenue (quantity times unit price) in each region? Return columns: ship_region, revenue (rounded to 2 decimals).",
+    "gold_sql": "SELECT ship_region, ROUND(SUM(quantity * unit_price), 2) FROM sales_lines GROUP BY ship_region",
+    "naive_sql": null,
+    "trap_explanation": "Control question, no trap. Revenue is a line-level amount and each line has one region, so nothing is repeated.",
+    "solution": "Sum quantity x unit price per region over sales_lines."
+  },
+  {
+    "id": "bk-rank-then-attach-v",
+    "db": "bookings",
+    "trap": "rank_then_attach",
+    "question": "Prepare an analysis that identifies the top five products in each division based on total booked amount. Next, create a follow-up analysis that lists the division, product, product sub-family, corporate customer ID, and total booked amount, showing only those products that ranked in the top five from the initial analysis. Return columns: division, product, product_subfamily, corp_id, total_amount.",
+    "gold_sql": "WITH ranked AS (SELECT division, product, RANK() OVER (PARTITION BY division ORDER BY SUM(amount_usd) DESC) AS rk FROM bookings GROUP BY division, product) SELECT b.division, b.product, b.product_subfamily, b.corp_id, ROUND(SUM(b.amount_usd), 2) FROM bookings b JOIN ranked r ON b.division = r.division AND b.product = r.product WHERE r.rk <= 5 GROUP BY b.division, b.product, b.product_subfamily, b.corp_id",
+    "naive_sql": "SELECT division, product, product_subfamily, corp_id, total FROM (SELECT division, product, product_subfamily, corp_id, ROUND(SUM(amount_usd), 2) AS total, RANK() OVER (PARTITION BY division ORDER BY SUM(amount_usd) DESC) AS rk FROM bookings GROUP BY division, product, product_subfamily, corp_id) WHERE rk <= 5",
+    "trap_explanation": "Two steps at two different grains. Products are ranked by their total within a division (grain: division + product). The list then breaks those products down by sub-family and customer. Ranking inside the detailed grouping (division, product, sub-family, customer) ranks customer slices of products, not products: it keeps the 5 biggest product-customer rows per division, so it picks the wrong products and drops most customers of the right ones. Sub-family adds no rows (each product has exactly one sub-family), but corp_id does: every product is booked by several customers.",
+    "solution": "First sum amount_usd per division and product and rank products within each division (ties kept); keep rank 1-5. Then take the bookings of only those division-product pairs and sum amount_usd per division, product, sub-family and customer. One row per division, product and customer; the amount is that customer's bookings of that product in that division. A product booked under two divisions is ranked separately in each.",
+    "vague_reading": "This is a user's question nearly word for word. The ranking is stated: top five products per division by total bookings. 'Total booked amount' in the follow-up is not tied to a grain, but the requested columns put one customer on each row, so it is the amount at the row's grain: per division, product, sub-family and customer."
+  },
+  {
+    "id": "bk-rank-then-count-v",
+    "db": "bookings",
+    "trap": "rank_then_attach",
+    "question": "Top 3 products per division by bookings, and how many customers each of them has. Return columns: division, product, total_amount, customers.",
+    "gold_sql": "SELECT division, product, total, customers FROM (SELECT division, product, ROUND(SUM(amount_usd), 2) AS total, COUNT(DISTINCT corp_id) AS customers, RANK() OVER (PARTITION BY division ORDER BY SUM(amount_usd) DESC) AS rk FROM bookings GROUP BY division, product) WHERE rk <= 3",
+    "naive_sql": "SELECT division, product, total, customers FROM (SELECT division, product, ROUND(SUM(amount_usd), 2) AS total, COUNT(corp_id) AS customers, RANK() OVER (PARTITION BY division ORDER BY SUM(amount_usd) DESC) AS rk FROM bookings GROUP BY division, product) WHERE rk <= 3",
+    "trap_explanation": "The same customer books the same product many times. Counting corp_id over booking rows counts bookings, not customers.",
+    "solution": "Per division and product: sum amount_usd, count distinct corp_id, and rank products within the division by the sum (ties kept); keep rank 1-3.",
+    "vague_reading": "'By bookings' means total booked amount. 'How many customers' means the distinct corporate customers who booked that product in that division, not the number of bookings."
+  },
+  {
+    "id": "bk-display-vs-consumption-v",
+    "db": "bookings",
+    "trap": "rank_then_attach",
+    "question": "Show our 5 biggest products by bookings, the divisions they are sold in, and their overall bookings. Return columns: product, division, product_total.",
+    "gold_sql": "WITH top AS (SELECT product, SUM(amount_usd) AS t FROM bookings GROUP BY product ORDER BY t DESC LIMIT 5) SELECT DISTINCT b.product, b.division, ROUND(top.t, 2) FROM top JOIN bookings b ON b.product = top.product",
+    "naive_sql": "SELECT product, division, ROUND(SUM(amount_usd), 2) FROM bookings GROUP BY product, division ORDER BY SUM(amount_usd) DESC LIMIT 5",
+    "trap_explanation": "21 of the 90 products are booked under two divisions. Ranking by product and division ranks product-division slices: a big product split across two divisions can drop out of the top 5, and the total shown is one division's part only. Ranking and total belong to the product; division is only listed.",
+    "solution": "Sum amount_usd per product over all divisions and take the 5 largest. Then list each distinct division the product was booked under, repeating the product's overall total on each row. A product booked under two divisions gives two rows with the same total.",
+    "vague_reading": "'Biggest by bookings' ranks products by their total over all divisions. 'Overall bookings' is that product total, not a division's part. The columns hold one division per row, so a product sold in two divisions gives two rows with the same total."
+  },
+  {
+    "id": "bk-share-mn-mapping-v",
+    "db": "bookings",
+    "trap": "mn_mapping",
+    "question": "Product sub-family mix within each division, as a percentage of the division's bookings. Return columns: division, product_subfamily, pct (0-100).",
+    "gold_sql": "WITH ds AS (SELECT division, product_subfamily, SUM(amount_usd) AS s FROM bookings GROUP BY division, product_subfamily), d AS (SELECT division, SUM(amount_usd) AS t FROM bookings GROUP BY division) SELECT ds.division, ds.product_subfamily, ROUND(100.0 * ds.s / d.t, 2) FROM ds JOIN d ON ds.division = d.division",
+    "naive_sql": "WITH sf AS (SELECT product_subfamily, SUM(amount_usd) AS s FROM bookings GROUP BY product_subfamily), m AS (SELECT DISTINCT division, product_subfamily FROM bookings), d AS (SELECT division, SUM(amount_usd) AS t FROM bookings GROUP BY division) SELECT m.division, m.product_subfamily, ROUND(100.0 * sf.s / d.t, 2) FROM m JOIN sf ON m.product_subfamily = sf.product_subfamily JOIN d ON m.division = d.division",
+    "trap_explanation": "A sub-family does not sit inside one division: 15 sub-families have bookings under more than one division, because some of their products are booked under two divisions. Taking a sub-family's total over all divisions and dividing by one division's total overstates the share; a division's shares can then add up to more than 100%.",
+    "solution": "Numerator: amount_usd per division and sub-family, counting only bookings under that division. Denominator: the division's total. pct = 100 x numerator / denominator. Each division's shares add up to 100.",
+    "vague_reading": "'Mix within each division' means each sub-family's bookings under that division as a share of the division's total, so each division's shares add up to 100."
+  },
+  {
+    "id": "bk-top-corps-divisions-v",
+    "db": "bookings",
+    "trap": "rank_then_attach",
+    "question": "Who are the top 3 customers in each sales org, and which divisions do they buy from? Include their bookings in that org. Return columns: sales_org, corp_id, division, total_amount (the customer's bookings in that org).",
+    "gold_sql": "WITH t AS (SELECT sales_org, corp_id, SUM(amount_usd) AS s, RANK() OVER (PARTITION BY sales_org ORDER BY SUM(amount_usd) DESC) AS rk FROM bookings GROUP BY sales_org, corp_id) SELECT DISTINCT t.sales_org, t.corp_id, b.division, ROUND(t.s, 2) FROM t JOIN bookings b ON b.sales_org = t.sales_org AND b.corp_id = t.corp_id WHERE t.rk <= 3",
+    "naive_sql": "SELECT sales_org, corp_id, division, total FROM (SELECT sales_org, corp_id, division, ROUND(SUM(amount_usd), 2) AS total, RANK() OVER (PARTITION BY sales_org ORDER BY SUM(amount_usd) DESC) AS rk FROM bookings GROUP BY sales_org, corp_id, division) WHERE rk <= 3",
+    "trap_explanation": "Customers book under several divisions. Ranking inside (sales org, customer, division) ranks a customer's division slices: it can pick the wrong customers, and it shows a division's part instead of the customer's total in the org.",
+    "solution": "Sum amount_usd per sales org and customer and rank customers within each org (ties kept); keep rank 1-3. Then list each distinct division that customer booked under in that org, repeating the customer's org total on each row.",
+    "vague_reading": "Customers are ranked by their bookings within each sales org. 'Which divisions they buy from' lists, one per row, the divisions they booked under in that org; the amount is defined as the customer's bookings in that org."
+  },
+  {
+    "id": "bk-weekly-top-orgs-v",
+    "db": "bookings",
+    "trap": "rank_then_attach",
+    "question": "What was the top product each week, and which sales orgs booked it? Return columns: booking_week, product, sales_org, week_total (the product's bookings that week).",
+    "gold_sql": "WITH t AS (SELECT booking_week, product, SUM(amount_usd) AS s, RANK() OVER (PARTITION BY booking_week ORDER BY SUM(amount_usd) DESC) AS rk FROM bookings GROUP BY booking_week, product) SELECT DISTINCT t.booking_week, t.product, b.sales_org, ROUND(t.s, 2) FROM t JOIN bookings b ON b.booking_week = t.booking_week AND b.product = t.product WHERE t.rk = 1",
+    "naive_sql": "SELECT booking_week, product, sales_org, total FROM (SELECT booking_week, product, sales_org, ROUND(SUM(amount_usd), 2) AS total, RANK() OVER (PARTITION BY booking_week ORDER BY SUM(amount_usd) DESC) AS rk FROM bookings GROUP BY booking_week, product, sales_org) WHERE rk = 1",
+    "trap_explanation": "A product is booked by several sales orgs in the same week. Ranking inside (week, product, org) finds the biggest org slice, not the biggest product, and reports that slice instead of the product's total for the week.",
+    "solution": "Sum amount_usd per week and product and rank products within each week; keep rank 1 (ties kept). Then list each distinct sales org that booked that product that week, repeating the product's week total on each row.",
+    "vague_reading": "'Top product each week' ranks products by their bookings that week. Each sales org that booked it that week gets a row; the amount is defined as the product's week total."
+  },
+  {
+    "id": "bk-family-division-share-v",
+    "db": "bookings",
+    "trap": "mn_mapping",
+    "question": "How do each product family's bookings split across divisions, in percent? Return columns: product_family, division, pct (0-100).",
+    "gold_sql": "WITH fd AS (SELECT product_family, division, SUM(amount_usd) AS s FROM bookings GROUP BY product_family, division), f AS (SELECT product_family, SUM(amount_usd) AS t FROM bookings GROUP BY product_family) SELECT fd.product_family, fd.division, ROUND(100.0 * fd.s / f.t, 2) FROM fd JOIN f ON f.product_family = fd.product_family",
+    "naive_sql": "WITH f AS (SELECT product_family, SUM(amount_usd) AS t FROM bookings GROUP BY product_family), m AS (SELECT DISTINCT product_family, division FROM bookings) SELECT m.product_family, m.division, ROUND(100.0 * SUM(b.amount_usd) / f.t, 2) FROM m JOIN f ON f.product_family = m.product_family JOIN bookings b ON b.product_family = m.product_family GROUP BY m.product_family, m.division",
+    "trap_explanation": "Family and division are many-to-many: a family's products are booked under several divisions. Joining a family's bookings to each (family, division) pair on family alone pulls in all of the family's bookings for every division, so every share comes out as 100%.",
+    "solution": "Sum amount_usd per family and division, divide by the family's total, and multiply by 100. Each family's shares add up to 100.",
+    "vague_reading": "'How each family's bookings split across divisions' means bookings per family and division as a share of the family's total, so each family's shares add up to 100."
+  },
+  {
+    "id": "sp-chasm-category-v",
+    "db": "supply",
+    "trap": "chasm",
+    "question": "Ordered vs. on-hand quantities by category. Return columns: category, total_ordered, total_on_hand.",
+    "gold_sql": "WITH o AS (SELECT p.category, SUM(l.quantity) AS q FROM order_lines l JOIN products p ON p.product_id = l.product_id GROUP BY p.category), i AS (SELECT p.category, SUM(v.on_hand) AS h FROM inventory v JOIN products p ON p.product_id = v.product_id GROUP BY p.category) SELECT p.category, COALESCE(o.q, 0), COALESCE(i.h, 0) FROM (SELECT DISTINCT category FROM products) p LEFT JOIN o ON o.category = p.category LEFT JOIN i ON i.category = p.category",
+    "naive_sql": "SELECT p.category, SUM(l.quantity), SUM(v.on_hand) FROM products p JOIN order_lines l ON l.product_id = p.product_id JOIN inventory v ON v.product_id = p.product_id GROUP BY p.category",
+    "trap_explanation": "Chasm trap. A product has many order lines and, separately, many inventory lots (often several per warehouse). Joining both to products in one query pairs every order line of a product with every lot of that product, so ordered quantity is repeated once per lot and on-hand units once per order line. Both totals come out too large.",
+    "solution": "Compute the two totals separately: ordered quantity per category (order_lines joined to products) and on-hand units per category (inventory joined to products). Then put them side by side per category, with 0 where one side has nothing.",
+    "vague_reading": "'Ordered' is the total order-line quantity; 'on-hand' is the total units in inventory over all warehouses and lots; both per category."
+  },
+  {
+    "id": "sp-what-if-double-v",
+    "db": "supply",
+    "trap": "chasm",
+    "question": "What happens to our inventory if Northwind Motors doubles its orders? For each product they ordered, show what we have on hand, the doubled demand, and what would be left. Return columns: product_name, total_on_hand, doubled_ordered, remaining.",
+    "gold_sql": "WITH q AS (SELECT l.product_id, 2 * SUM(l.quantity) AS dq FROM order_lines l JOIN orders o ON o.order_id = l.order_id JOIN customers c ON c.customer_id = o.customer_id WHERE c.customer_name = 'Northwind Motors' GROUP BY l.product_id), h AS (SELECT product_id, SUM(on_hand) AS oh FROM inventory GROUP BY product_id) SELECT p.product_name, COALESCE(h.oh, 0), q.dq, COALESCE(h.oh, 0) - q.dq FROM q JOIN products p ON p.product_id = q.product_id LEFT JOIN h ON h.product_id = q.product_id",
+    "naive_sql": "SELECT p.product_name, SUM(v.on_hand), 2 * SUM(l.quantity), SUM(v.on_hand) - 2 * SUM(l.quantity) FROM order_lines l JOIN orders o ON o.order_id = l.order_id JOIN customers c ON c.customer_id = o.customer_id JOIN products p ON p.product_id = l.product_id JOIN inventory v ON v.product_id = l.product_id WHERE c.customer_name = 'Northwind Motors' GROUP BY p.product_name",
+    "trap_explanation": "Chasm trap. Joining Northwind Motors' order lines and the products' inventory lots in one query pairs every line with every lot of the same product, so both on-hand and ordered totals are inflated, and so is 'remaining'.",
+    "solution": "Separately compute (a) Northwind Motors' ordered quantity per product, doubled, and (b) each product's on-hand units over all warehouses and lots. Join them per product for the products Northwind ordered; remaining = on hand - doubled ordered. A product with no stock has 0 on hand.",
+    "vague_reading": "'Doubles its orders' means twice the quantity it ordered of each product. 'What we have on hand' is the product's stock over all warehouses and lots; 'left' is on hand minus doubled demand."
+  },
+  {
+    "id": "sp-projection-join-v",
+    "db": "supply",
+    "trap": "projection_join",
+    "question": "Stock vs. shipments by product and warehouse. Return columns: product_id, warehouse_id, on_hand, shipped.",
+    "gold_sql": "WITH i AS (SELECT product_id, warehouse_id, SUM(on_hand) AS oh FROM inventory GROUP BY product_id, warehouse_id), s AS (SELECT product_id, warehouse_id, SUM(quantity) AS q FROM order_lines GROUP BY product_id, warehouse_id) SELECT i.product_id, i.warehouse_id, i.oh, COALESCE(s.q, 0) FROM i LEFT JOIN s ON s.product_id = i.product_id AND s.warehouse_id = i.warehouse_id",
+    "naive_sql": "SELECT v.product_id, v.warehouse_id, SUM(v.on_hand), COALESCE(SUM(l.quantity), 0) FROM inventory v LEFT JOIN order_lines l ON l.product_id = v.product_id AND l.warehouse_id = v.warehouse_id GROUP BY v.product_id, v.warehouse_id",
+    "trap_explanation": "Inventory has several lots for the same product and warehouse (52 such pairs), and several order lines ship the same product from the same warehouse. Joining lots to order lines on product and warehouse pairs every lot with every line, so on-hand is repeated once per shipped line and shipped quantity once per lot.",
+    "solution": "Sum on_hand per product and warehouse from inventory; separately sum shipped quantity per product and warehouse from order_lines. Join the two on product and warehouse, keeping every stocked pair, with shipped = 0 where nothing was shipped.",
+    "vague_reading": "One row per product and warehouse: units on hand there and units shipped from there. Every shipped product-warehouse pair is also stocked, so listing stocked pairs covers them."
+  },
+  {
+    "id": "sp-fan-orders-v",
+    "db": "supply",
+    "trap": "fan",
+    "question": "Orders and revenue by customer (revenue = quantity x unit price). Return columns: customer_name, orders, revenue.",
+    "gold_sql": "SELECT c.customer_name, COUNT(DISTINCT o.order_id), ROUND(SUM(l.quantity * p.unit_price), 2) FROM customers c JOIN orders o ON o.customer_id = c.customer_id JOIN order_lines l ON l.order_id = o.order_id JOIN products p ON p.product_id = l.product_id GROUP BY c.customer_name",
+    "naive_sql": "SELECT c.customer_name, COUNT(o.order_id), ROUND(SUM(l.quantity * p.unit_price), 2) FROM customers c JOIN orders o ON o.customer_id = c.customer_id JOIN order_lines l ON l.order_id = o.order_id JOIN products p ON p.product_id = l.product_id GROUP BY c.customer_name",
+    "trap_explanation": "Fan trap. An order has several lines. Once orders are joined to order lines (needed for revenue), each order appears once per line, so COUNT(order_id) counts lines, not orders.",
+    "solution": "Join customers, orders, order lines and products. Revenue = sum of quantity x unit price over the lines. Orders = number of distinct order IDs.",
+    "vague_reading": "'Orders' is the number of distinct orders the customer placed; revenue is defined in the question."
+  },
+  {
+    "id": "sp-top-n-attach-v",
+    "db": "supply",
+    "trap": "rank_then_attach",
+    "question": "Our 3 most ordered products: where are they stocked and how much, plus their total ordered. Return columns: product_name, warehouse_name, on_hand, total_ordered.",
+    "gold_sql": "WITH t AS (SELECT product_id, SUM(quantity) AS q FROM order_lines GROUP BY product_id ORDER BY q DESC LIMIT 3), i AS (SELECT product_id, warehouse_id, SUM(on_hand) AS oh FROM inventory GROUP BY product_id, warehouse_id) SELECT p.product_name, w.warehouse_name, i.oh, t.q FROM t JOIN i ON i.product_id = t.product_id JOIN products p ON p.product_id = t.product_id JOIN warehouses w ON w.warehouse_id = i.warehouse_id",
+    "naive_sql": "SELECT p.product_name, w.warehouse_name, SUM(v.on_hand), SUM(l.quantity) FROM order_lines l JOIN inventory v ON v.product_id = l.product_id JOIN products p ON p.product_id = l.product_id JOIN warehouses w ON w.warehouse_id = v.warehouse_id WHERE l.product_id IN (SELECT product_id FROM order_lines GROUP BY product_id ORDER BY SUM(quantity) DESC LIMIT 3) GROUP BY p.product_name, w.warehouse_name",
+    "trap_explanation": "Chasm trap. Ordered quantity comes from order lines and stock from inventory lots, both many per product. Joining them per product repeats each line once per lot and each lot once per line, inflating both on-hand per warehouse and total ordered.",
+    "solution": "Find the 3 products with the largest total ordered quantity, from order_lines alone. Sum on_hand per product and warehouse from inventory. One row per top product and warehouse holding it: that warehouse's on-hand and the product's total ordered (the same on each of its rows).",
+    "vague_reading": "'Most ordered' means largest total quantity ordered. 'Where they are stocked and how much' is one row per warehouse holding the product with its on-hand units there; 'total ordered' is the product's total over all warehouses."
+  },
+  {
+    "id": "sp-over-ordered-v",
+    "db": "supply",
+    "trap": "chasm",
+    "question": "Which products are we overselling, i.e. ordered more than we have in stock? Return columns: product_name, total_ordered, in_stock.",
+    "gold_sql": "WITH o AS (SELECT product_id, SUM(quantity) AS q FROM order_lines GROUP BY product_id), i AS (SELECT product_id, SUM(on_hand) AS h FROM inventory GROUP BY product_id) SELECT p.product_name, o.q, COALESCE(i.h, 0) FROM products p JOIN o ON o.product_id = p.product_id LEFT JOIN i ON i.product_id = p.product_id WHERE o.q > COALESCE(i.h, 0)",
+    "naive_sql": "SELECT p.product_name, SUM(l.quantity), SUM(v.on_hand) FROM products p JOIN order_lines l ON l.product_id = p.product_id JOIN inventory v ON v.product_id = p.product_id GROUP BY p.product_name HAVING SUM(l.quantity) > SUM(v.on_hand)",
+    "trap_explanation": "Chasm trap. The two totals being compared come from two different 'many' tables (order lines and inventory lots). Joined in one query, both are multiplied, so the reported totals and the comparison are wrong.",
+    "solution": "Total ordered per product from order_lines; total on hand per product from inventory over all warehouses and lots (0 if none). Keep the products where ordered > on hand.",
+    "vague_reading": "Compare each product's total ordered quantity with its total stock over all warehouses and lots."
+  },
+  {
+    "id": "sp-warehouse-stock-shipped-v",
+    "db": "supply",
+    "trap": "chasm",
+    "question": "Stock and shipments per warehouse. Return columns: warehouse_name, in_stock, shipped.",
+    "gold_sql": "WITH i AS (SELECT warehouse_id, SUM(on_hand) AS h FROM inventory GROUP BY warehouse_id), s AS (SELECT warehouse_id, SUM(quantity) AS q FROM order_lines GROUP BY warehouse_id) SELECT w.warehouse_name, COALESCE(i.h, 0), COALESCE(s.q, 0) FROM warehouses w LEFT JOIN i ON i.warehouse_id = w.warehouse_id LEFT JOIN s ON s.warehouse_id = w.warehouse_id",
+    "naive_sql": "SELECT w.warehouse_name, SUM(v.on_hand), SUM(l.quantity) FROM warehouses w JOIN inventory v ON v.warehouse_id = w.warehouse_id JOIN order_lines l ON l.warehouse_id = w.warehouse_id AND l.product_id = v.product_id GROUP BY w.warehouse_name",
+    "trap_explanation": "Chasm trap. A warehouse has many inventory lots and many shipped order lines. Joining them pairs lots with lines, so stock is repeated once per shipped line and shipments once per lot.",
+    "solution": "Stock: sum on_hand per warehouse from inventory. Shipped: sum quantity per warehouse from order_lines. Put them side by side per warehouse, with 0 where one side has nothing.",
+    "vague_reading": "'Stock' is total on-hand units held at the warehouse; 'shipments' is total quantity shipped from it."
+  },
+  {
+    "id": "sp-avg-units-per-order-v",
+    "db": "supply",
+    "trap": "fan",
+    "question": "Average order size in units, by customer. Return columns: customer_name, avg_units.",
+    "gold_sql": "SELECT c.customer_name, ROUND(1.0 * SUM(l.quantity) / COUNT(DISTINCT o.order_id), 2) FROM customers c JOIN orders o ON o.customer_id = c.customer_id JOIN order_lines l ON l.order_id = o.order_id GROUP BY c.customer_name",
+    "naive_sql": "SELECT c.customer_name, ROUND(AVG(l.quantity), 2) FROM customers c JOIN orders o ON o.customer_id = c.customer_id JOIN order_lines l ON l.order_id = o.order_id GROUP BY c.customer_name",
+    "trap_explanation": "Wrong grain caused by the order-to-lines fan-out. AVG(quantity) over order lines is the average units per line. An order has 1-5 lines, so the average per order is larger.",
+    "solution": "Per customer: total units over all their order lines divided by their number of distinct orders (the same as summing units per order and then averaging those orders).",
+    "vague_reading": "'Average order size in units' is units per order (total units divided by number of orders), not units per order line."
+  },
+  {
+    "id": "sp-category-suppliers-v",
+    "db": "supply",
+    "trap": "mn_mapping",
+    "question": "By category: units ordered and how many suppliers we use. Return columns: category, total_ordered, suppliers.",
+    "gold_sql": "WITH o AS (SELECT p.category, SUM(l.quantity) AS q FROM order_lines l JOIN products p ON p.product_id = l.product_id GROUP BY p.category), s AS (SELECT p.category, COUNT(DISTINCT ps.supplier_id) AS n FROM product_suppliers ps JOIN products p ON p.product_id = ps.product_id GROUP BY p.category) SELECT s.category, COALESCE(o.q, 0), s.n FROM s LEFT JOIN o ON o.category = s.category",
+    "naive_sql": "SELECT p.category, SUM(l.quantity), COUNT(DISTINCT ps.supplier_id) FROM products p JOIN order_lines l ON l.product_id = p.product_id JOIN product_suppliers ps ON ps.product_id = p.product_id GROUP BY p.category",
+    "trap_explanation": "Products and suppliers are many-to-many: a product has 1-3 suppliers. Joining order lines and product suppliers to products in one query repeats each order line once per supplier of its product, inflating total ordered. The distinct supplier count is not affected.",
+    "solution": "Separately compute total ordered per category (order_lines with products) and the number of distinct suppliers per category (product_suppliers with products), then join by category.",
+    "vague_reading": "'Units ordered' is total order-line quantity per category; 'how many suppliers we use' is the number of distinct suppliers of the category's products."
+  },
+  {
+    "id": "sp-stock-value-orders-v",
+    "db": "supply",
+    "trap": "chasm",
+    "question": "By category: value of the stock we hold and number of orders. Return columns: category, stock_value, orders.",
+    "gold_sql": "WITH v AS (SELECT p.category, SUM(i.on_hand * p.unit_price) AS sv FROM inventory i JOIN products p ON p.product_id = i.product_id GROUP BY p.category), o AS (SELECT p.category, COUNT(DISTINCT l.order_id) AS n FROM order_lines l JOIN products p ON p.product_id = l.product_id GROUP BY p.category) SELECT c.category, ROUND(COALESCE(v.sv, 0), 2), COALESCE(o.n, 0) FROM (SELECT DISTINCT category FROM products) c LEFT JOIN v ON v.category = c.category LEFT JOIN o ON o.category = c.category",
+    "naive_sql": "SELECT p.category, ROUND(SUM(i.on_hand * p.unit_price), 2), COUNT(DISTINCT l.order_id) FROM products p JOIN inventory i ON i.product_id = p.product_id JOIN order_lines l ON l.product_id = p.product_id GROUP BY p.category",
+    "trap_explanation": "Chasm trap. Stock value comes from inventory lots and the order count from order lines, both many per product. In one join each lot repeats once per order line, inflating stock value. The distinct order count is not affected.",
+    "solution": "Separately compute stock value per category (sum of on_hand x unit_price over inventory) and orders per category (distinct order IDs among lines for that category's products), then join by category.",
+    "vague_reading": "'Value of the stock' is on-hand units times unit price; 'number of orders' is the number of distinct orders that include a product of the category."
+  },
+  {
+    "id": "sh-shipping-by-segment-v",
+    "db": "shop",
+    "trap": "fan",
+    "question": "Shipping revenue by customer segment. Return columns: customer_segment, shipping_total.",
+    "gold_sql": "SELECT customer_segment, ROUND(SUM(fee), 2) FROM (SELECT DISTINCT order_id, customer_segment, shipping_fee AS fee FROM sales_lines) GROUP BY customer_segment",
+    "naive_sql": "SELECT customer_segment, ROUND(SUM(shipping_fee), 2) FROM sales_lines GROUP BY customer_segment",
+    "trap_explanation": "Fan trap inside one wide table. sales_lines has one row per order line, but the shipping fee belongs to the order and is repeated on every line of it. Summing the fee over lines charges each order's fee once per line.",
+    "solution": "Reduce to one row per order first (each order has exactly one segment and one fee), then sum the fees per segment.",
+    "vague_reading": "'Shipping revenue' is the shipping fees charged. A fee is charged once per order, even though the table repeats it on each line."
+  },
+  {
+    "id": "sh-avg-shipping-region-v",
+    "db": "shop",
+    "trap": "fan",
+    "question": "Average shipping charge per order, by region. Return columns: ship_region, avg_fee.",
+    "gold_sql": "SELECT ship_region, ROUND(AVG(fee), 2) FROM (SELECT DISTINCT order_id, ship_region, shipping_fee AS fee FROM sales_lines) GROUP BY ship_region",
+    "naive_sql": "SELECT ship_region, ROUND(AVG(shipping_fee), 2) FROM sales_lines GROUP BY ship_region",
+    "trap_explanation": "The shipping fee belongs to the order and is repeated on every line. Averaging it over lines weights each order by its number of lines, so orders with many lines count more.",
+    "solution": "Reduce to one row per order (each order has exactly one region and one fee), then average the fees per region.",
+    "vague_reading": "'Per order' is stated: the average over orders, each order counted once."
+  },
+  {
+    "id": "sh-order-value-top-v",
+    "db": "shop",
+    "trap": "fan",
+    "question": "Top 5 orders by value, shipping included. Return columns: order_id, order_value.",
+    "gold_sql": "SELECT order_id, ROUND(SUM(quantity * unit_price) + MAX(shipping_fee), 2) AS v FROM sales_lines GROUP BY order_id ORDER BY v DESC LIMIT 5",
+    "naive_sql": "SELECT order_id, ROUND(SUM(quantity * unit_price + shipping_fee), 2) AS v FROM sales_lines GROUP BY order_id ORDER BY v DESC LIMIT 5",
+    "trap_explanation": "The shipping fee is repeated on every line of an order. Adding it inside the per-line sum counts it once per line.",
+    "solution": "Per order: sum quantity x unit price over its lines, then add the order's fee once (it is the same on every line, so MAX or any single value works). Take the 5 largest.",
+    "vague_reading": "'Value, shipping included' is the goods value (quantity x unit price over the lines) plus the order's shipping fee, charged once."
+  },
+  {
+    "id": "sh-top-products-category-v",
+    "db": "shop",
+    "trap": "null_split",
+    "question": "Top 5 products by revenue, with their category (revenue = quantity x unit price). Return columns: product_name, category, revenue.",
+    "gold_sql": "SELECT product_name, MAX(category), ROUND(SUM(quantity * unit_price), 2) AS r FROM sales_lines GROUP BY product_name ORDER BY SUM(quantity * unit_price) DESC LIMIT 5",
+    "naive_sql": "SELECT product_name, category, ROUND(SUM(quantity * unit_price), 2) AS r FROM sales_lines GROUP BY product_name, category ORDER BY SUM(quantity * unit_price) DESC LIMIT 5",
+    "trap_explanation": "NULL split. 10 products have their category missing on part of their rows; apart from that, each product has only one category. Grouping by product and category splits such a product into two groups (its category and NULL), so its revenue is split, the ranking is wrong, and it can appear twice. These products also sell more than average, so the split changes the top 5.",
+    "solution": "Group by product only and sum revenue. Show the product's one non-missing category (e.g. MAX(category), which ignores NULL). Take the 5 largest.",
+    "vague_reading": "Products are ranked by their total revenue. 'Their category' is the product's category; a product has one category, and the missing values are gaps in the data, not a second category."
+  },
+  {
+    "id": "sh-product-revenue-list-v",
+    "db": "shop",
+    "trap": "null_split",
+    "question": "Units sold by product, with category. Return columns: product_name, category, units.",
+    "gold_sql": "SELECT product_name, MAX(category), SUM(quantity) FROM sales_lines GROUP BY product_name",
+    "naive_sql": "SELECT product_name, category, SUM(quantity) FROM sales_lines GROUP BY product_name, category",
+    "trap_explanation": "NULL split. 10 products have their category missing on part of their rows. Grouping by product and category gives two rows for each of them (category and NULL) and splits their units between the two.",
+    "solution": "One row per product: its one non-missing category and its total units over all its rows.",
+    "vague_reading": "One row per product with its category and total units. A product has one category; the missing values are gaps in the data, not a second category."
+  },
+  {
+    "id": "sh-tagged-revenue-v",
+    "db": "shop",
+    "trap": "mn_mapping",
+    "question": "Revenue from eco or premium products (revenue = quantity x unit price). Return columns: revenue.",
+    "gold_sql": "SELECT ROUND(SUM(quantity * unit_price), 2) FROM sales_lines WHERE product_name IN (SELECT product_name FROM product_tags WHERE tag IN ('eco', 'premium'))",
+    "naive_sql": "SELECT ROUND(SUM(s.quantity * s.unit_price), 2) FROM sales_lines s JOIN product_tags t ON t.product_name = s.product_name WHERE t.tag IN ('eco', 'premium')",
+    "trap_explanation": "Products and tags are many-to-many. 2 products carry both 'eco' and 'premium'; joining sales to tags and filtering to those tags keeps their sales twice.",
+    "solution": "Find the products tagged eco or premium, then sum the revenue of sales lines whose product is in that set, so each line counts once.",
+    "vague_reading": "'Eco or premium products' are products carrying either tag; each sale counts once even if its product has both tags."
+  },
+  {
+    "id": "sh-region-target-v",
+    "db": "shop",
+    "trap": "projection_join",
+    "question": "Q1 2026 revenue vs. target by region (revenue = quantity x unit price). Return columns: region, revenue, target.",
+    "gold_sql": "WITH a AS (SELECT ship_region AS region, SUM(quantity * unit_price) AS r FROM sales_lines WHERE order_date BETWEEN '2026-01-01' AND '2026-03-31' GROUP BY ship_region), t AS (SELECT region, SUM(target_revenue) AS t FROM sales_targets WHERE quarter = '2026-Q1' GROUP BY region) SELECT t.region, ROUND(COALESCE(a.r, 0), 2), ROUND(t.t, 2) FROM t LEFT JOIN a ON a.region = t.region",
+    "naive_sql": "SELECT s.ship_region, ROUND(SUM(s.quantity * s.unit_price), 2), ROUND(SUM(t.target_revenue), 2) FROM sales_lines s JOIN sales_targets t ON t.region = s.ship_region AND t.quarter = '2026-Q1' WHERE s.order_date BETWEEN '2026-01-01' AND '2026-03-31' GROUP BY s.ship_region",
+    "trap_explanation": "Targets are set per region, segment and quarter, so a region has 3 target rows per quarter (one per segment). Joining sales lines to targets on region and quarter matches each line to 3 target rows: revenue is tripled and the target is summed once per sales line.",
+    "solution": "Separately compute Q1 2026 revenue per region from sales_lines (by order_date) and the Q1 target per region as the sum of its three segment targets; join by region.",
+    "vague_reading": "'Target by region' is the region's Q1 2026 target, i.e. the sum of its segment targets; revenue is Q1 2026 sales in that region."
+  },
+  {
+    "id": "sh-segment-attainment-v",
+    "db": "shop",
+    "trap": "projection_join",
+    "question": "Q2 2026 target attainment by segment, in percent (revenue = quantity x unit price). Return columns: customer_segment, pct (0-100).",
+    "gold_sql": "WITH a AS (SELECT customer_segment, SUM(quantity * unit_price) AS r FROM sales_lines WHERE order_date BETWEEN '2026-04-01' AND '2026-06-30' GROUP BY customer_segment), t AS (SELECT customer_segment, SUM(target_revenue) AS t FROM sales_targets WHERE quarter = '2026-Q2' GROUP BY customer_segment) SELECT t.customer_segment, ROUND(100.0 * COALESCE(a.r, 0) / t.t, 2) FROM t LEFT JOIN a ON a.customer_segment = t.customer_segment",
+    "naive_sql": "WITH a AS (SELECT customer_segment, SUM(quantity * unit_price) AS r FROM sales_lines WHERE order_date BETWEEN '2026-04-01' AND '2026-06-30' GROUP BY customer_segment) SELECT a.customer_segment, ROUND(100.0 * SUM(a.r) / SUM(t.target_revenue), 2) FROM a JOIN sales_targets t ON t.customer_segment = a.customer_segment AND t.quarter = '2026-Q2' GROUP BY a.customer_segment",
+    "trap_explanation": "Targets are set per region, segment and quarter, so a segment has 4 target rows per quarter (one per region). Joining the segment's revenue to its target rows on segment and quarter repeats the revenue 4 times, so attainment comes out 4 times too high.",
+    "solution": "Q2 2026 revenue per segment from sales_lines; Q2 target per segment = sum over its 4 regions; pct = 100 x revenue / target.",
+    "vague_reading": "'Target attainment' is Q2 2026 revenue as a percentage of the segment's Q2 target, i.e. the sum of its regional targets."
+  },
+  {
+    "id": "sh-top-customers-regions-v",
+    "db": "shop",
+    "trap": "rank_then_attach",
+    "question": "Top 5 customers by revenue and where they ship to (revenue = quantity x unit price). Return columns: customer_name, ship_region, revenue.",
+    "gold_sql": "WITH t AS (SELECT customer_name, SUM(quantity * unit_price) AS r FROM sales_lines GROUP BY customer_name ORDER BY r DESC LIMIT 5) SELECT DISTINCT t.customer_name, s.ship_region, ROUND(t.r, 2) FROM t JOIN sales_lines s ON s.customer_name = t.customer_name",
+    "alt_gold_sql": [
+      "WITH t AS (SELECT customer_name FROM sales_lines GROUP BY customer_name ORDER BY SUM(quantity * unit_price) DESC LIMIT 5) SELECT s.customer_name, s.ship_region, ROUND(SUM(s.quantity * s.unit_price), 2) FROM sales_lines s JOIN t ON t.customer_name = s.customer_name GROUP BY s.customer_name, s.ship_region"
+    ],
+    "naive_sql": "SELECT customer_name, ship_region, ROUND(SUM(quantity * unit_price), 2) AS r FROM sales_lines GROUP BY customer_name, ship_region ORDER BY SUM(quantity * unit_price) DESC LIMIT 5",
+    "trap_explanation": "8 customers ship to two regions. Ranking (customer, region) groups ranks regional slices: it can miss customers, and it shows one region's part instead of the customer's total.",
+    "solution": "Sum revenue per customer and take the 5 largest. Then list each distinct region they ship to, repeating the customer's total on each row.",
+    "vague_reading": "Customers are ranked by their total revenue, and 'where they ship to' lists, one per row, each region they ship to. 'Revenue' is not tied to a grain here, so two readings are accepted: the customer's total repeated on each region row (gold), or the customer's revenue in that region (alt_gold_sql). Ranking region slices instead of customers is the trap in both readings."
+  },
+  {
+    "id": "sh-tag-category-revenue-v",
+    "db": "shop",
+    "trap": "mn_mapping",
+    "question": "Revenue and number of different product tags bought, by segment (revenue = quantity x unit price). Return columns: customer_segment, revenue, tags.",
+    "gold_sql": "WITH r AS (SELECT customer_segment, SUM(quantity * unit_price) AS r FROM sales_lines GROUP BY customer_segment), t AS (SELECT s.customer_segment, COUNT(DISTINCT pt.tag) AS n FROM (SELECT DISTINCT customer_segment, product_name FROM sales_lines) s JOIN product_tags pt ON pt.product_name = s.product_name GROUP BY s.customer_segment) SELECT r.customer_segment, ROUND(r.r, 2), COALESCE(t.n, 0) FROM r LEFT JOIN t ON t.customer_segment = r.customer_segment",
+    "naive_sql": "SELECT s.customer_segment, ROUND(SUM(s.quantity * s.unit_price), 2), COUNT(DISTINCT t.tag) FROM sales_lines s JOIN product_tags t ON t.product_name = s.product_name GROUP BY s.customer_segment",
+    "trap_explanation": "Products have 1-3 tags. Joining sales lines to tags repeats each line once per tag of its product, inflating revenue. The distinct tag count is not affected.",
+    "solution": "Revenue per segment from sales_lines alone; separately, the number of distinct tags among the products each segment bought; join by segment.",
+    "vague_reading": "'Revenue' is the segment's total sales; 'number of different product tags bought' is the distinct tags among the products the segment bought."
+  }
+]
