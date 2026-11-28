@@ -37,12 +37,21 @@ aggregate SQL, and uses them twice:
 
 **Benchmark gold has it too.** Run on BIRD's gold queries, the audit finds distorted gold answers for
 4.2% of the dev questions. BIRD's own later revision, made without our flags, changed 44% of the
-answers the audit flags as definite fan-out, against 16% of unflagged ones.
+answers the audit flags as definite fan-out, against 16% of unflagged ones. On seven other benchmarks,
+distorted gold is no more common than in BIRD on public data, but affects 9–24% of golds in the two
+enterprise databases of BEAVER ([`benchmarks/other-benchmarks/`](benchmarks/other-benchmarks/)).
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/bird-revision-dark.png">
     <img src="docs/bird-revision-light.png" alt="BIRD's revision changed 44% of the gold answers with a definite fan-out flag and 16% of unflagged ones" width="640">
+  </picture>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/other-benchmarks-dark.png">
+    <img src="docs/other-benchmarks-light.png" alt="Share of gold queries distorted by fan-out: at most 0.4% on Spider, KaggleDBQA, ATIS, Advising and FIBEN, 1 of 24 on Spider 2.0-Lite, 4.2% on BIRD dev, and 9 to 24% on BEAVER's enterprise databases" width="640">
   </picture>
 </p>
 
@@ -75,6 +84,7 @@ paper).
 | `benchmarks/bird-fanout-train/` | **BIRD-FanOut, train**: 384 questions of BIRD train, built the same way. |
 | `benchmarks/column-roles.jsonl` | The role of every column the benchmarks use: identifier, dimension or measure. |
 | `benchmarks/bird-fanout/` | Pilot set from the June 2024 BIRD dev, used to choose the labelling judges. |
+| `benchmarks/other-benchmarks/` | The audit on seven other benchmarks: two agent labels for each definite flag (484), and the per-benchmark table. |
 
 Both benchmarks are also on Hugging Face: [ahmed-mahran/bird-fanout](https://huggingface.co/datasets/ahmed-mahran/bird-fanout)
 and [ahmed-mahran/graintraps](https://huggingface.co/datasets/ahmed-mahran/graintraps) (with its SQLite databases).
@@ -149,7 +159,9 @@ Building the benchmarks (each module's docstring gives its command): `misqal.fan
 of every gold query), `misqal.fanout.label` (judges' intent labels and corrections),
 `misqal.fanout.bird_changes` (comparison with BIRD's later release), `misqal.fanout.build_subset`
 (assembly), `misqal.fanout.gold_review` (review of every gold for other errors) and
-`misqal.harness.column_roles` (column roles).
+`misqal.harness.column_roles` (column roles). The audit on other benchmarks: `misqal.xbench`
+(conversion of ATIS, Advising, FIBEN and BEAVER to SQLite, `misqal.xbench.audit`, `misqal.xbench.table`;
+see `benchmarks/other-benchmarks/README.md`).
 
 ## Layout
 
@@ -160,6 +172,7 @@ of every gold query), `misqal.fanout.label` (judges' intent labels and correctio
 | `src/misqal/fanout/` | The audit, and the BIRD-FanOut pipeline (labels, release comparison, assembly, gold review) |
 | `src/misqal/harness/` | The agent (`agent.py`), prompts and arms (`prompts.py`), grain-aware evidence (`evidence_v2.py`), benchmark loaders and scoring (`bench.py`), models (`models.py`), the run CLI (`run.py`) and the analysis tools |
 | `src/misqal/traps/` | The GrainTraps databases |
+| `src/misqal/xbench/` | The audit on other benchmarks, and their conversion to SQLite |
 | `tests/` | Unit tests, the profile checked against a brute-force FD oracle, and offline agent tests with a scripted model |
 
 **NULL semantics.** The FD profile counts NULL as one value, as GROUP BY does. Then `d(A) = d(AB)`
@@ -206,5 +219,7 @@ BIRD-FanOut is derived from BIRD; please cite it as well:
 ## License
 
 Code: Apache-2.0 (see `LICENSE`). The benchmarks under `benchmarks/bird-fanout*` and
-`benchmarks/column-roles.jsonl` are derived from BIRD and are released under CC BY-SA 4.0, as BIRD is. GrainTraps
+`benchmarks/column-roles.jsonl` are derived from BIRD and are released under CC BY-SA 4.0, as BIRD is.
+`benchmarks/other-benchmarks/` includes material from Spider and KaggleDBQA and is released under
+CC BY-SA 4.0 too. GrainTraps
 (`benchmarks/graintraps/`) is released under CC BY 4.0.
